@@ -1,0 +1,17 @@
+cat > .gitignore << 'EOF'
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# WoW cache / temp
+*.bak
+*.tmp
+
+# Lua bytecode (just in case)
+*.luac
+EOF
