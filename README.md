@@ -4,6 +4,9 @@
 
 Designed for healers and support players who want instant visibility into their click-cast setup—without opening menus or remembering modifier combinations.
 
+## Download
+Download HoverCasts on CurseForge: https://legacy.curseforge.com/wow/addons/hovercasts
+
 ## Features
 
 - Shows Blizzard click-cast bindings on hover
