@@ -1,16 +1,30 @@
 -- HoverCasts.lua
--- Addon entrypoint: events, slash commands, orchestration.
+-- -----------------------------------------------------------------------------
+-- HoverCasts :: Entrypoint
+--
+-- Responsibilities:
+--   • Register events and drive rendering while hovering supported unit frames.
+--   • Provide slash commands for basic control and debugging.
+--   • Orchestrate data flow:
+--       HoverFilter -> hovered unit
+--       Bindings    -> click-cast bindings for current modifier mask
+--       UI          -> tooltip render + sizing + placement
 --
 -- Public-release behavior:
---   - One welcome/help line printed ONCE per session on login/reload.
---   - No other automatic chat output.
---   - /hc with no args or unknown args prints the same help line.
+--   • Prints ONE welcome/help line ONCE per session (login/reload).
+--   • No other automatic chat output.
+--   • /hc with no args or unknown args prints the same help line.
 --
 -- Dependencies (loaded via other addon files):
 --   ns.Util        -> U
 --   ns.HoverFilter -> HF
 --   ns.Bindings    -> B
 --   ns.UI          -> UI
+--
+-- Notes:
+--   • Spec retrieval is intentionally conservative: only the player's spec is
+--     reliably available without inspecting others (safe default).
+-- -----------------------------------------------------------------------------
 
 local ADDON_NAME, ns = ...
 local U  = ns.Util
@@ -20,52 +34,61 @@ local UI = ns.UI
 
 local f = CreateFrame("Frame")
 
--- -----------------------------
--- Config (defaults)
--- -----------------------------
+-- -----------------------------------------------------------------------------
+-- Configuration (defaults)
+-- -----------------------------------------------------------------------------
+-- These are runtime defaults. Settings persistence (SavedVariables) can later
+-- override them.
 local CONFIG = {
+    -- Layout
     padding = 6,
     lineSpacing = 1,
     maxLines = 12,
     scale = 1.0,
 
+    -- Background/border
     bgAlpha = 0.92,
     borderAlpha = 0.90,
 
+    -- Cursor anchoring
     cursorOffsetX = 40,
     cursorOffsetY = -40,
-
     clampPadding = 10,
+
+    -- Update cadence (while tooltip shown)
     pollInterval = 0.05,
 
+    -- Columns
     minActionX = 0,
     minActionGap = 4,
     manaGap = 8,
 
+    -- Fade
     fadeInTime = 0.04,
     fadeOutTime = 0.04,
 
-    -- modifier text highlight
+    -- Modifier line styling
     modTextUseHighlight = true,
     modTextHighlightColor = { r = 1.00, g = 1.00, b = 1.00 }, -- white
     modTextGlow = false,
 
-    -- cooldown styling
-    cooldownParenHex = "ff8a8a", -- light red
-    cooldownGreyHex  = "b0b0b0", -- grey spell name when on cooldown
+    -- Cooldown styling (grey out spell name + light-red cooldown suffix)
+    cooldownParenHex = "ff8a8a",
+    cooldownGreyHex  = "b0b0b0",
 
-    -- mana column color
+    -- Mana column color
     manaHex = "4da6ff",
 
-    -- debug
+    -- Debug behavior
     showWhenNoUnit = false,
 }
 
+-- Tooltip instance
 local tip = UI.Create(CONFIG)
 
--- -----------------------------
--- Sorting (left, middle, right, buttons…)
--- -----------------------------
+-- -----------------------------------------------------------------------------
+-- Sorting (left, middle, right, then extra buttons)
+-- -----------------------------------------------------------------------------
 local BUTTON_ORDER = {
     LeftButton   = 1,
     MiddleButton = 2,
@@ -81,9 +104,10 @@ local function SortEntries(a, b)
     return tostring(a.action) < tostring(b.action)
 end
 
--- -----------------------------
--- Unit info line helpers
--- -----------------------------
+-- -----------------------------------------------------------------------------
+-- Unit info helpers
+-- -----------------------------------------------------------------------------
+-- Returns player's spec name, if reliably available; otherwise nil.
 local function GetUnitSpecName(unit)
     if not unit or not UnitExists(unit) then return nil end
     if not UnitIsPlayer(unit) then return nil end
@@ -115,6 +139,7 @@ local function GetUnitSpecName(unit)
     return nil
 end
 
+-- Builds: "Level X Race Spec Class" (spec only if we can get it safely).
 local function GetUnitInfoText(unit)
     if not unit or not UnitExists(unit) then return "" end
 
@@ -134,9 +159,10 @@ local function GetUnitInfoText(unit)
     return table.concat(parts, " ")
 end
 
--- -----------------------------
+-- -----------------------------------------------------------------------------
 -- Modifier line styling
--- -----------------------------
+-- -----------------------------------------------------------------------------
+-- Produces the modifier display line (already wrapped and optionally colorized).
 local function BuildModifierLine(mask)
     local raw = U.ModifierTextFromMask(mask)
     local wrapped = U.WrapModifierText(raw)
@@ -149,15 +175,16 @@ local function BuildModifierLine(mask)
     return wrapped
 end
 
--- -----------------------------
+-- -----------------------------------------------------------------------------
 -- Render pipeline
--- -----------------------------
+-- -----------------------------------------------------------------------------
 local _inRender = false
 
 local function Render()
     if _inRender then return end
     _inRender = true
 
+    -- Decide whether we should be visible
     local unit = HF.GetHoveredUnit()
     if not unit and not CONFIG.showWhenNoUnit then
         tip:FadeOut()
@@ -165,9 +192,14 @@ local function Render()
         return
     end
 
-    if not B.cached then B.RefreshCache() end
+    -- Ensure we have bindings cached
+    if not B.cached then
+        B.RefreshCache()
+    end
 
     local mask = U.CurrentModifierMask()
+
+    -- Header + modifier line
     local headerText = ""
     local modLine = BuildModifierLine(mask)
 
@@ -183,9 +215,11 @@ local function Render()
         end
     end
 
+    -- Gather entries for this modifier mask and sort
     local entries = B.GetEntriesForMask(mask)
     table.sort(entries, SortEntries)
 
+    -- Precompute per-entry display strings (cooldown + grey-out + mana text)
     for _, e in ipairs(entries) do
         local actionName = e.action or ""
         local cdText = (e.cd and e.cd > 0) and U.FormatCooldown(e.cd) or nil
@@ -210,6 +244,7 @@ local function Render()
         end
     end
 
+    -- Render + position
     UI.Render(tip, CONFIG, headerText, modLine, entries)
     tip:SetCursorAnchoredPosition()
     tip:FadeIn()
@@ -217,9 +252,9 @@ local function Render()
     _inRender = false
 end
 
--- -----------------------------
--- Poll: keep position + hide reliably
--- -----------------------------
+-- -----------------------------------------------------------------------------
+-- Poll: keep position + hide reliably while tooltip is shown
+-- -----------------------------------------------------------------------------
 do
     local accum = 0
     tip:SetScript("OnUpdate", function(_, dt)
@@ -239,9 +274,9 @@ do
     end)
 end
 
--- -----------------------------
--- Events (safe)
--- -----------------------------
+-- -----------------------------------------------------------------------------
+-- Events (safe registration)
+-- -----------------------------------------------------------------------------
 local function SafeRegisterEvent(frame, evt)
     pcall(frame.RegisterEvent, frame, evt)
 end
@@ -251,8 +286,22 @@ SafeRegisterEvent(f, "UPDATE_MOUSEOVER_UNIT")
 SafeRegisterEvent(f, "MODIFIER_STATE_CHANGED")
 SafeRegisterEvent(f, "CURSOR_CHANGED")
 
+-- -----------------------------------------------------------------------------
+-- Chat output (public release policy)
+-- -----------------------------------------------------------------------------
+local function Print(msg)
+    print(("HoverCasts: %s"):format(tostring(msg)))
+end
+
+local HELP_LINE =
+    "Hover party/raid/focus frames to view click-cast bindings. Commands: /hc on | off | refresh | strict"
+
 -- Forward-declared welcome (must exist before PLAYER_LOGIN fires)
-local Welcome
+local function Welcome()
+    Print(HELP_LINE)
+end
+
+-- Print once per session on login/reload
 local _welcomedThisSession = false
 
 f:SetScript("OnEvent", function(_, event)
@@ -275,20 +324,9 @@ f:SetScript("OnEvent", function(_, event)
     end
 end)
 
--- -----------------------------
+-- -----------------------------------------------------------------------------
 -- Slash commands
--- -----------------------------
-local function Print(msg)
-    print(("HoverCasts: %s"):format(tostring(msg)))
-end
-
-local HELP_LINE =
-    "Hover party/raid/focus frames to view click-cast bindings. Commands: /hc on | off | refresh | strict"
-
-Welcome = function()
-    Print(HELP_LINE)
-end
-
+-- -----------------------------------------------------------------------------
 SLASH_HOVERCASTS1 = "/hc"
 SLASH_HOVERCASTS2 = "/hovercasts"
 SLASH_HOVERCASTS3 = "/hcc" -- back-compat

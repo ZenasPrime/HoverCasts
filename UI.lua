@@ -1,12 +1,61 @@
 -- UI.lua
--- Tooltip UI: build rows, size/measure columns, smart positioning, fade.
+-- -----------------------------------------------------------------------------
+-- HoverCasts :: UI
+--
+-- Purpose:
+--   Owns the tooltip frame used by HoverCasts:
+--     • Builds the tooltip frame, header + modifier lines, and fixed row pool.
+--     • Renders rows from resolved binding entries.
+--     • Measures text widths to compute compact columns:
+--         Button | Ability | Mana
+--     • Positions tooltip near cursor with smart “flip + clamp” to avoid
+--       rendering off-screen.
+--     • Provides snappy fade in/out helpers.
+--
+-- Public API:
+--   UI.Create(config) -> tip
+--     - Creates the tooltip frame and returns it. The returned frame ("tip")
+--       includes helper methods:
+--         tip:SetCursorAnchoredPosition()
+--         tip:FadeIn()
+--         tip:FadeOut()
+--         tip:ClearRows()
+--
+--   UI.Render(tip, config, headerText, modText, entries)
+--     - Renders the header + modifier line and the entry table, and computes
+--       the tooltip size + column anchors.
+--
+-- Inputs expected by UI.Render:
+--   headerText: string
+--     - Already colorized (name class-colored) by caller.
+--   modText: string
+--     - Already wrapped/colored (e.g. "[Shift+Ctrl]") by caller.
+--   entries: array of tables (from Bindings.GetEntriesForMask), typically
+--            already sorted by caller.
+--     - Each entry may include:
+--         e.btn        (string)
+--         e.action     (string)
+--         e.actionText (string) -- optional (colorized + cooldown suffix)
+--         e.manaText   (string) -- optional (colorized)
+--
+-- Notes:
+--   • This module intentionally does not decide “what to show” — only “how to
+--     show it.” Filtering/sorting/formatting policy stays in the entrypoint.
+-- -----------------------------------------------------------------------------
 
 local ADDON_NAME, ns = ...
 ns.UI = ns.UI or {}
 local UI = ns.UI
+
 local U = ns.Util
 
--- Creates and returns the tooltip frame + helpers.
+-- -----------------------------------------------------------------------------
+-- UI.Create
+-- -----------------------------------------------------------------------------
+-- Creates the tooltip frame and control helpers.
+--
+-- @param config table
+-- @return Frame tip
 function UI.Create(config)
     local tip = CreateFrame("Frame", "HoverCastsTip", UIParent, "BackdropTemplate")
     tip:SetScale(config.scale or 1)
@@ -24,21 +73,23 @@ function UI.Create(config)
     tip:SetBackdropColor(0.05, 0.05, 0.06, config.bgAlpha or 0.92)
     tip:SetBackdropBorderColor(0.35, 0.35, 0.38, config.borderAlpha or 0.90)
 
+    -- Header (unit info)
     tip.header = tip:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     tip.header:SetPoint("TOPLEFT", config.padding, -config.padding)
     tip.header:SetJustifyH("LEFT")
 
+    -- Modifier line (e.g. "[Shift+Ctrl]" already colored by caller)
     tip.modLine = tip:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     tip.modLine:SetPoint("TOPLEFT", tip.header, "BOTTOMLEFT", 0, -(config.lineSpacing + 3))
     tip.modLine:SetJustifyH("LEFT")
 
-    -- Hidden measure strings (for accurate widths)
+    -- Hidden measuring strings to get accurate widths for each column style.
     tip.measureBtn  = tip:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     tip.measureAct  = tip:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     tip.measureMana = tip:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     tip.measureBtn:Hide(); tip.measureAct:Hide(); tip.measureMana:Hide()
 
-    -- Rows
+    -- Row pool (fixed number of rows; we show/hide as needed).
     tip.rows = {}
     local ROW_H = 12
 
@@ -54,14 +105,17 @@ function UI.Create(config)
             row:SetPoint("TOPRIGHT", tip.rows[i-1], "BOTTOMRIGHT", 0, -config.lineSpacing)
         end
 
+        -- Left column: Button name
         row.button = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
         row.button:SetPoint("LEFT", row, "LEFT", config.padding, 0)
         row.button:SetJustifyH("LEFT")
 
+        -- Right column: Mana
         row.mana = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         row.mana:SetPoint("RIGHT", row, "RIGHT", -config.padding, 0)
         row.mana:SetJustifyH("RIGHT")
 
+        -- Middle column: Ability (anchors set dynamically during Render)
         row.action = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         row.action:SetJustifyH("LEFT")
 
@@ -69,7 +123,10 @@ function UI.Create(config)
         tip.rows[i] = row
     end
 
-    -- Positioning
+    -- -------------------------------------------------------------------------
+    -- Cursor-relative positioning (smart flip + clamp)
+    -- -------------------------------------------------------------------------
+    -- Places tooltip away from cursor and clamps to screen bounds.
     function tip:SetCursorAnchoredPosition()
         local x, y = GetCursorPosition()
         local s = UIParent:GetEffectiveScale()
@@ -82,6 +139,7 @@ function UI.Create(config)
         local uiW = UIParent:GetWidth()
         local uiH = UIParent:GetHeight()
 
+        -- Choose quadrant: right vs left, down vs up
         local placeRight = (x < uiW * 0.55)
         local placeDown  = (y > uiH * 0.45)
 
@@ -91,6 +149,7 @@ function UI.Create(config)
         local left = placeRight and (x + offX) or (x - offX - w)
         local top  = placeDown  and (y + offY) or (y - offY + h)
 
+        -- Clamp within screen
         if left < pad then left = pad end
         if (left + w + pad) > uiW then left = uiW - w - pad end
 
@@ -101,7 +160,9 @@ function UI.Create(config)
         self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
     end
 
+    -- -------------------------------------------------------------------------
     -- Fade helpers
+    -- -------------------------------------------------------------------------
     function tip:FadeIn()
         self:Show()
         if UIFrameFadeIn then
@@ -120,7 +181,9 @@ function UI.Create(config)
         end
     end
 
-    -- Row clear
+    -- -------------------------------------------------------------------------
+    -- Utility: Clear rows without touching data tables
+    -- -------------------------------------------------------------------------
     function tip:ClearRows()
         for i = 1, config.maxLines do
             local row = self.rows[i]
@@ -135,13 +198,17 @@ function UI.Create(config)
     return tip
 end
 
--- Renders rows and sizes tooltip.
--- Inputs:
---   tip: tooltip
---   config: config table
---   headerText: string (already colorized)
---   modText: string (already wrapped/colored as desired)
---   entries: list from Bindings.GetEntriesForMask (already sorted by caller)
+-- -----------------------------------------------------------------------------
+-- UI.Render
+-- -----------------------------------------------------------------------------
+-- Renders header/mod line + entries, measures columns, sizes tooltip,
+-- and anchors the action column between button and mana.
+--
+-- @param tip Frame
+-- @param config table
+-- @param headerText string
+-- @param modText string
+-- @param entries table[]|nil
 function UI.Render(tip, config, headerText, modText, entries)
     tip.header:SetText(headerText or "")
     tip.modLine:SetText(modText or "")
@@ -149,6 +216,8 @@ function UI.Render(tip, config, headerText, modText, entries)
     tip:ClearRows()
 
     local shownCount = 0
+
+    -- Fill rows
     if not entries or #entries == 0 then
         local row = tip.rows[1]
         row.button:SetText("")
@@ -164,6 +233,7 @@ function UI.Render(tip, config, headerText, modText, entries)
 
             row.button:SetText(e.btn or "")
             row.action:SetText(e.actionText or (e.action or ""))
+
             if e.manaText then
                 row.mana:SetText(e.manaText)
             else
@@ -174,28 +244,44 @@ function UI.Render(tip, config, headerText, modText, entries)
         end
     end
 
-    -- Measure columns
+    -- Measure columns using hidden measuring strings (accurate widths)
     local maxBtnW, maxActionW, maxManaW = 0, 0, 0
+
     for i = 1, shownCount do
         local row = tip.rows[i]
         if row and row:IsShown() then
-            maxBtnW = math.max(maxBtnW, U.MeasureFS(tip.measureBtn, row.button:GetText()))
-            maxManaW = math.max(maxManaW, U.MeasureFS(tip.measureMana, row.mana:GetText()))
-            maxActionW = math.max(maxActionW, U.MeasureFS(tip.measureAct, row.action:GetText()))
+            maxBtnW    = math.max(maxBtnW,    U.MeasureFS(tip.measureBtn,  row.button:GetText()))
+            maxManaW   = math.max(maxManaW,   U.MeasureFS(tip.measureMana, row.mana:GetText()))
+            maxActionW = math.max(maxActionW, U.MeasureFS(tip.measureAct,  row.action:GetText()))
         end
     end
 
     local pad = config.padding or 6
-    local actionX = pad + maxBtnW + (config.minActionGap or 4)
-    if actionX < (config.minActionX or 0) then actionX = config.minActionX or 0 end
 
+    -- Action column starts after button column (plus a small gap)
+    local actionX = pad + maxBtnW + (config.minActionGap or 4)
+    if actionX < (config.minActionX or 0) then
+        actionX = config.minActionX or 0
+    end
+
+    -- Tooltip width must fit: button + gap + action + gap + mana + padding
     local headerW = U.MeasureFS(tip.measureAct, tip.header:GetText()) + pad * 2
     local modW    = U.MeasureFS(tip.measureAct, tip.modLine:GetText()) + pad * 2
-    local totalW  = pad + maxBtnW + (config.minActionGap or 4) + maxActionW + (config.manaGap or 8) + maxManaW + pad
-    local width   = math.max(totalW, headerW, modW)
 
-    -- Height
-    local height = pad
+    local totalW =
+        pad
+        + maxBtnW
+        + (config.minActionGap or 4)
+        + maxActionW
+        + (config.manaGap or 8)
+        + maxManaW
+        + pad
+
+    local width = math.max(totalW, headerW, modW)
+
+    -- Height: header + modLine + rows + padding
+    local height =
+        pad
         + (tip.header:GetStringHeight() or 0)
         + (config.lineSpacing + 3)
         + (tip.modLine:GetStringHeight() or 0)
@@ -207,12 +293,14 @@ function UI.Render(tip, config, headerText, modText, entries)
             height = height + row:GetHeight() + (config.lineSpacing or 1)
         end
     end
+
     height = height + pad
 
     tip:SetSize(width, height)
 
-    -- Anchor action between button and mana column
+    -- Anchor action between button and mana column (right inset reserves mana)
     local inset = pad + (config.manaGap or 8) + maxManaW
+
     for i = 1, shownCount do
         local row = tip.rows[i]
         if row and row:IsShown() then
