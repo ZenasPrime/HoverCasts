@@ -1,11 +1,12 @@
-## Interface: 120000
+## Interface: 120001
 ## Title: HoverCasts
 ## Notes: Shows Blizzard Click Casting bindings near the cursor on Party/Raid/Focus frames.
 ## Author: Zen
-## Version: 1.0.2
+## Version: 1.0.3
 ## SavedVariables: HoverCastsDB
 
 Util.lua
+Settings.lua
 HoverFilter.lua
 Bindings.lua
 UI.lua

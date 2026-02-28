@@ -2,28 +2,26 @@
 -- -----------------------------------------------------------------------------
 -- HoverCasts :: Entrypoint
 --
--- Responsibilities:
---   • Register events and drive rendering while hovering supported unit frames.
---   • Provide slash commands for basic control and debugging.
---   • Orchestrate data flow:
---       HoverFilter -> hovered unit
---       Bindings    -> click-cast bindings for current modifier mask
---       UI          -> tooltip render + sizing + placement
---
 -- Public-release behavior:
---   • Prints ONE welcome/help line ONCE per session (login/reload).
+--   • One welcome/help line printed ONCE per session on login/reload.
 --   • No other automatic chat output.
 --   • /hc with no args or unknown args prints the same help line.
+--
+-- Slash commands:
+--   /hc                      -> help
+--   /hc on|off               -> debug show/hide (showWhenNoUnit)
+--   /hc refresh              -> refresh click-cast cache
+--   /hc strict               -> strict mode (show only on allowed unit frames)
+--   /hc frames               -> print frame toggles summary
+--   /hc <frame>              -> toggle a frame (party/raid/focus/player/target/enemy/world)
+--   /hc <frame> on|off        -> set a frame explicitly
 --
 -- Dependencies (loaded via other addon files):
 --   ns.Util        -> U
 --   ns.HoverFilter -> HF
 --   ns.Bindings    -> B
 --   ns.UI          -> UI
---
--- Notes:
---   • Spec retrieval is intentionally conservative: only the player's spec is
---     reliably available without inspecting others (safe default).
+--   ns.Settings    -> S (optional but recommended)
 -- -----------------------------------------------------------------------------
 
 local ADDON_NAME, ns = ...
@@ -31,64 +29,66 @@ local U  = ns.Util
 local HF = ns.HoverFilter
 local B  = ns.Bindings
 local UI = ns.UI
+local S  = ns.Settings
 
 local f = CreateFrame("Frame")
 
--- -----------------------------------------------------------------------------
--- Configuration (defaults)
--- -----------------------------------------------------------------------------
--- These are runtime defaults. Settings persistence (SavedVariables) can later
--- override them.
+-- ---------------------------------------------------------------------
+-- Basic safety: if a required module is missing, fail quietly.
+-- (Avoid chat spam; just don't run.)
+-- ---------------------------------------------------------------------
+if not (U and HF and B and UI) then
+    -- If you want a single visible hint during development, uncomment:
+    -- print("HoverCasts: Missing module(s). Check .toc load order.")
+    return
+end
+
+-- ---------------------------------------------------------------------
+-- Config (defaults)
+-- ---------------------------------------------------------------------
 local CONFIG = {
-    -- Layout
     padding = 6,
     lineSpacing = 1,
     maxLines = 12,
     scale = 1.0,
 
-    -- Background/border
     bgAlpha = 0.92,
     borderAlpha = 0.90,
 
-    -- Cursor anchoring
     cursorOffsetX = 40,
     cursorOffsetY = -40,
-    clampPadding = 10,
 
-    -- Update cadence (while tooltip shown)
+    clampPadding = 10,
     pollInterval = 0.05,
 
-    -- Columns
     minActionX = 0,
     minActionGap = 4,
     manaGap = 8,
 
-    -- Fade
     fadeInTime = 0.04,
     fadeOutTime = 0.04,
 
-    -- Modifier line styling
+    -- modifier text highlight
     modTextUseHighlight = true,
     modTextHighlightColor = { r = 1.00, g = 1.00, b = 1.00 }, -- white
     modTextGlow = false,
 
-    -- Cooldown styling (grey out spell name + light-red cooldown suffix)
-    cooldownParenHex = "ff8a8a",
-    cooldownGreyHex  = "b0b0b0",
+    -- cooldown styling
+    cooldownParenHex = "ff8a8a", -- light red
+    cooldownGreyHex  = "b0b0b0", -- grey spell name when on cooldown
 
-    -- Mana column color
+    -- mana column color
     manaHex = "4da6ff",
 
-    -- Debug behavior
+    -- debug
     showWhenNoUnit = false,
 }
 
--- Tooltip instance
 local tip = UI.Create(CONFIG)
 
--- -----------------------------------------------------------------------------
--- Sorting (left, middle, right, then extra buttons)
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- Sorting (left, middle, right, buttons…)
+-- ---------------------------------------------------------------------
 local BUTTON_ORDER = {
     LeftButton   = 1,
     MiddleButton = 2,
@@ -104,10 +104,9 @@ local function SortEntries(a, b)
     return tostring(a.action) < tostring(b.action)
 end
 
--- -----------------------------------------------------------------------------
--- Unit info helpers
--- -----------------------------------------------------------------------------
--- Returns player's spec name, if reliably available; otherwise nil.
+-- ---------------------------------------------------------------------
+-- Unit info line helpers
+-- ---------------------------------------------------------------------
 local function GetUnitSpecName(unit)
     if not unit or not UnitExists(unit) then return nil end
     if not UnitIsPlayer(unit) then return nil end
@@ -139,7 +138,6 @@ local function GetUnitSpecName(unit)
     return nil
 end
 
--- Builds: "Level X Race Spec Class" (spec only if we can get it safely).
 local function GetUnitInfoText(unit)
     if not unit or not UnitExists(unit) then return "" end
 
@@ -159,10 +157,9 @@ local function GetUnitInfoText(unit)
     return table.concat(parts, " ")
 end
 
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
 -- Modifier line styling
--- -----------------------------------------------------------------------------
--- Produces the modifier display line (already wrapped and optionally colorized).
+-- ---------------------------------------------------------------------
 local function BuildModifierLine(mask)
     local raw = U.ModifierTextFromMask(mask)
     local wrapped = U.WrapModifierText(raw)
@@ -175,16 +172,15 @@ local function BuildModifierLine(mask)
     return wrapped
 end
 
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
 -- Render pipeline
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
 local _inRender = false
 
 local function Render()
     if _inRender then return end
     _inRender = true
 
-    -- Decide whether we should be visible
     local unit = HF.GetHoveredUnit()
     if not unit and not CONFIG.showWhenNoUnit then
         tip:FadeOut()
@@ -192,14 +188,11 @@ local function Render()
         return
     end
 
-    -- Ensure we have bindings cached
     if not B.cached then
         B.RefreshCache()
     end
 
     local mask = U.CurrentModifierMask()
-
-    -- Header + modifier line
     local headerText = ""
     local modLine = BuildModifierLine(mask)
 
@@ -215,7 +208,6 @@ local function Render()
         end
     end
 
-    -- Gather entries for this modifier mask and sort
     local entries = B.GetEntriesForMask(mask)
     table.sort(entries, SortEntries)
 
@@ -244,7 +236,6 @@ local function Render()
         end
     end
 
-    -- Render + position
     UI.Render(tip, CONFIG, headerText, modLine, entries)
     tip:SetCursorAnchoredPosition()
     tip:FadeIn()
@@ -252,9 +243,9 @@ local function Render()
     _inRender = false
 end
 
--- -----------------------------------------------------------------------------
--- Poll: keep position + hide reliably while tooltip is shown
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- Poll: keep position + hide reliably
+-- ---------------------------------------------------------------------
 do
     local accum = 0
     tip:SetScript("OnUpdate", function(_, dt)
@@ -274,9 +265,9 @@ do
     end)
 end
 
--- -----------------------------------------------------------------------------
--- Events (safe registration)
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- Events (safe)
+-- ---------------------------------------------------------------------
 local function SafeRegisterEvent(frame, evt)
     pcall(frame.RegisterEvent, frame, evt)
 end
@@ -286,26 +277,30 @@ SafeRegisterEvent(f, "UPDATE_MOUSEOVER_UNIT")
 SafeRegisterEvent(f, "MODIFIER_STATE_CHANGED")
 SafeRegisterEvent(f, "CURSOR_CHANGED")
 
--- -----------------------------------------------------------------------------
--- Chat output (public release policy)
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- Chat helpers + welcome
+-- ---------------------------------------------------------------------
 local function Print(msg)
     print(("HoverCasts: %s"):format(tostring(msg)))
 end
 
 local HELP_LINE =
-    "Hover party/raid/focus frames to view click-cast bindings. Commands: /hc on | off | refresh | strict"
+    "Hover party/raid/focus frames to view click-cast bindings. " ..
+    "Commands: /hc frames | /hc <frame> [on|off] | /hc refresh | /hc strict"
 
--- Forward-declared welcome (must exist before PLAYER_LOGIN fires)
 local function Welcome()
     Print(HELP_LINE)
 end
 
--- Print once per session on login/reload
 local _welcomedThisSession = false
 
 f:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_LOGIN" then
+        -- Initialize SavedVariables (if Settings module is present)
+        if S and S.Init then
+            pcall(S.Init, S)
+        end
+
         B.RefreshCache()
         Render()
 
@@ -324,22 +319,75 @@ f:SetScript("OnEvent", function(_, event)
     end
 end)
 
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- Frame toggle helpers (Settings)
+-- ---------------------------------------------------------------------
+local VALID_FRAME_KEYS = {
+    party = true,
+    raid = true,
+    focus = true,
+    player = true,
+    target = true,
+    enemy = true,
+    world = true,
+}
+
+local function PrintFramesSummary()
+    if S and S.FramesSummary then
+        Print("Frames: " .. S:FramesSummary())
+    else
+        Print("Frames: settings module not loaded (check .toc order).")
+    end
+end
+
+local function SetOrToggleFrame(key, maybeState)
+    key = (key or ""):lower()
+    if not VALID_FRAME_KEYS[key] then
+        return false, ("Unknown frame '%s'"):format(tostring(key))
+    end
+
+    if not (S and S.SetFrameEnabled and S.ToggleFrame and S.GetFrames) then
+        return false, "Settings module not loaded (check .toc order)."
+    end
+
+    local newValue
+    if maybeState == nil or maybeState == "" then
+        newValue = S:ToggleFrame(key)
+    else
+        local state = tostring(maybeState):lower()
+        if state == "on" or state == "1" or state == "true" then
+            S:SetFrameEnabled(key, true)
+            newValue = true
+        elseif state == "off" or state == "0" or state == "false" then
+            S:SetFrameEnabled(key, false)
+            newValue = false
+        else
+            return false, "State must be 'on' or 'off'."
+        end
+    end
+
+    return true, ("%s = %s"):format(key, newValue and "ON" or "OFF")
+end
+
+-- ---------------------------------------------------------------------
 -- Slash commands
--- -----------------------------------------------------------------------------
+-- ---------------------------------------------------------------------
 SLASH_HOVERCASTS1 = "/hc"
 SLASH_HOVERCASTS2 = "/hovercasts"
 SLASH_HOVERCASTS3 = "/hcc" -- back-compat
 
 SlashCmdList.HOVERCASTS = function(msg)
     msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-
     if msg == "" then
         Welcome()
         return
     end
 
-    if msg == "on" then
+    -- tokenization: "<a> <b>"
+    local a, b = msg:match("^(%S+)%s*(.-)$")
+    b = (b and b:gsub("^%s+", ""):gsub("%s+$", "")) or ""
+
+    if a == "on" then
         CONFIG.showWhenNoUnit = true
         tip:Show()
         tip:SetAlpha(1)
@@ -348,23 +396,42 @@ SlashCmdList.HOVERCASTS = function(msg)
         return
     end
 
-    if msg == "off" then
+    if a == "off" then
         tip:Hide()
         Print("Hidden.")
         return
     end
 
-    if msg == "refresh" then
+    if a == "refresh" then
         B.RefreshCache()
         Render()
         Print("Refreshed.")
         return
     end
 
-    if msg == "strict" then
+    if a == "strict" then
         CONFIG.showWhenNoUnit = false
         Render()
         Print("Strict mode (only show on allowed unit frames).")
+        return
+    end
+
+    if a == "frames" then
+        PrintFramesSummary()
+        return
+    end
+
+    -- Frame toggle: "/hc player" or "/hc player on|off"
+    if VALID_FRAME_KEYS[a] then
+        local ok, res = SetOrToggleFrame(a, b ~= "" and b or nil)
+        if ok then
+            Print(res)
+            PrintFramesSummary()
+            Render()
+        else
+            Print(res)
+            Welcome()
+        end
         return
     end
 

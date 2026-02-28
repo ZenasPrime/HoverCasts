@@ -2,17 +2,17 @@
 -- -----------------------------------------------------------------------------
 -- HoverCasts :: Bindings
 --
--- Responsibilities:
---   • Read Blizzard click-cast bindings from C_ClickBindings (profile cache)
---   • Resolve each binding into displayable action data:
---       - Spell name (or macro/interact label)
---       - Mana cost (mana spells only)
---       - Cooldown remaining (seconds; nil if none)
---       - Spell vs non-spell flag
+-- Purpose:
+--   - Cache Blizzard Click Casting bindings (C_ClickBindings)
+--   - Resolve each binding into a displayable action:
+--       spell name, mana cost, cooldown remaining (optional), isSpell
 --
 -- Notes:
---   • Some modern API returns "secure/secret" values (not directly comparable).
---     We sanitize/cast cooldown fields to plain numbers before comparisons.
+--   - Cooldowns in Retail can return "secret/tainted" numeric values via C_Spell.
+--     Any direct comparisons may error. We avoid that by:
+--       (1) preferring GetSpellCooldown(spellID) when available
+--       (2) wrapping cooldown computation in pcall
+--       (3) returning nil when values are not safely usable
 -- -----------------------------------------------------------------------------
 
 local ADDON_NAME, ns = ...
@@ -25,8 +25,6 @@ B.cached = nil
 -- -----------------------------------------------------------------------------
 -- Cache
 -- -----------------------------------------------------------------------------
-
---- Refreshes the click-cast binding cache from the active profile.
 function B.RefreshCache()
     B.cached = {}
 
@@ -39,7 +37,6 @@ function B.RefreshCache()
         return
     end
 
-    -- Retail has been observed returning either { bindings = {...} } or an array-like table.
     if type(info.bindings) == "table" then
         B.cached = info.bindings
         return
@@ -54,7 +51,6 @@ end
 -- -----------------------------------------------------------------------------
 -- Spell helpers
 -- -----------------------------------------------------------------------------
-
 local function ResolveSpellName(spellID)
     if not spellID then return nil end
 
@@ -89,106 +85,66 @@ local function GetSpellManaCost(spellID)
     return nil
 end
 
--- Some APIs can return "secret" numbers that error on compare/math.
--- Safely coerce to a plain Lua number by attempting arithmetic in pcall.
-local function SafeNumber(v)
-    if v == nil then return nil end
-
-    -- First try arithmetic coercion (this will fail for "secret" values)
-    local ok, n = pcall(function()
-        return (v + 0)
-    end)
-    if ok and type(n) == "number" then
-        return n
-    end
-
-    -- Fallback: tonumber in pcall (covers strings)
-    ok, n = pcall(tonumber, v)
-    if ok and type(n) == "number" then
-        return n
-    end
-
-    return nil
-end
-
+-- -----------------------------------------------------------------------------
+-- Cooldown (SAFE)
+-- -----------------------------------------------------------------------------
 local function GetSpellCooldownRemaining(spellID)
     if not spellID then return nil end
 
-    -- Prefer classic API if present (often safest), but still sanitize.
-    if type(GetSpellCooldown) == "function" then
-        local startTime, duration, enabled = GetSpellCooldown(spellID)
+    -- Wrap EVERYTHING so "secret/tainted" numeric comparisons can't crash the addon.
+    local ok, remaining = pcall(function()
+        local startTime, duration, enabled
 
-        startTime = SafeNumber(startTime)
-        duration  = SafeNumber(duration)
+        -- Prefer legacy API: returns multiple values and is typically safer.
+        if type(GetSpellCooldown) == "function" then
+            startTime, duration, enabled = GetSpellCooldown(spellID)
+        elseif C_Spell and C_Spell.GetSpellCooldown then
+            local cd = C_Spell.GetSpellCooldown(spellID)
+            if type(cd) == "table" then
+                startTime = cd.startTime
+                duration  = cd.duration
+                enabled   = cd.isEnabled
+            end
+        end
 
+        -- If anything looks unusable, bail safely.
         if enabled == 0 then
             return nil
         end
-        if not startTime or not duration then
+
+        -- Avoid *any* direct comparison on unknown/secret values by validating first.
+        if type(startTime) ~= "number" or type(duration) ~= "number" then
             return nil
         end
 
-        local ok, isZeroOrNeg = pcall(function()
-            return duration <= 0
-        end)
-        if (not ok) or isZeroOrNeg then
+        -- duration 0 means no cooldown (or GCD only).
+        if duration == 0 then
             return nil
         end
 
-        local ok2, remaining = pcall(function()
-            return (startTime + duration) - GetTime()
-        end)
-        if ok2 and remaining and remaining > 0.05 then
-            return remaining
+        local now = GetTime()
+        local r = (startTime + duration) - now
+
+        -- Only show if meaningful.
+        if type(r) == "number" and r > 0.05 then
+            return r
         end
         return nil
-    end
-
-    -- Fallback: C_Spell.GetSpellCooldown (sanitize and guard all ops)
-    if not C_Spell or not C_Spell.GetSpellCooldown then
-        return nil
-    end
-
-    local ok, cd = pcall(C_Spell.GetSpellCooldown, spellID)
-    if not ok or type(cd) ~= "table" then
-        return nil
-    end
-
-    local startTime = SafeNumber(cd.startTime)
-    local duration  = SafeNumber(cd.duration)
-
-    if not startTime or not duration then
-        return nil
-    end
-
-    local ok3, isZeroOrNeg = pcall(function()
-        return duration <= 0
     end)
-    if (not ok3) or isZeroOrNeg then
+
+    if not ok then
+        -- If Blizzard hands us an unsafe value, just hide cooldown info.
         return nil
     end
 
-    local ok4, remaining = pcall(function()
-        return (startTime + duration) - GetTime()
-    end)
-    if ok4 and remaining and remaining > 0.05 then
-        return remaining
-    end
-
-    return nil
+    return remaining
 end
 
-
 -- -----------------------------------------------------------------------------
--- Binding resolution
+-- Resolve binding -> action
+-- Returns:
+--   actionName, manaCostOrNil, cooldownSecondsOrNil, isSpellBool
 -- -----------------------------------------------------------------------------
-
---- Resolves a single click binding into action data.
--- @param binding table
--- @return string actionName
--- @return number|nil manaCost
--- @return number|nil cooldownRemainingSeconds
--- @return boolean isSpell
 function B.ResolveAction(binding)
     if type(binding) ~= "table" then
         return "Unknown", nil, nil, false
@@ -197,9 +153,9 @@ function B.ResolveAction(binding)
     local actionID = binding.actionID or binding.spellID or binding.macroID or binding.action or binding.id
     local t = binding.type or binding.actionType
 
-    local enumSpell   = Enum and Enum.ClickBindingType and Enum.ClickBindingType.Spell
-    local enumMacro   = Enum and Enum.ClickBindingType and Enum.ClickBindingType.Macro
-    local enumInteract= Enum and Enum.ClickBindingType and Enum.ClickBindingType.Interact
+    local enumSpell    = Enum and Enum.ClickBindingType and Enum.ClickBindingType.Spell
+    local enumMacro    = Enum and Enum.ClickBindingType and Enum.ClickBindingType.Macro
+    local enumInteract = Enum and Enum.ClickBindingType and Enum.ClickBindingType.Interact
 
     local isSpell =
         (t == "SPELL") or (t == "Spell") or (enumSpell and t == enumSpell) or (binding.spellID ~= nil)
@@ -230,24 +186,15 @@ function B.ResolveAction(binding)
 end
 
 -- -----------------------------------------------------------------------------
--- Query
--- -----------------------------------------------------------------------------
-
---- Returns a list of entries for the given modifier mask.
+-- Entries
+-- Returns a list of entries for the given modifier mask.
 -- Each entry:
 --   { btn, action, mana, cd, isSpell, _rawButton }
--- Sorting is done by the caller (HoverCasts.lua) so UI rules live in one place.
--- @param mask number
--- @return table
+-- -----------------------------------------------------------------------------
 function B.GetEntriesForMask(mask)
-    if not B.cached then
-        B.RefreshCache()
-    end
-
+    if not B.cached then B.RefreshCache() end
     local src = B.cached
-    if not src or #src == 0 then
-        return {}
-    end
+    if not src or #src == 0 then return {} end
 
     local out = {}
     for _, bnd in ipairs(src) do
